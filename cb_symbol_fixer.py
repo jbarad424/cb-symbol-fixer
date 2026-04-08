@@ -10,11 +10,6 @@ Pipeline:
   3. Claude Vision QA checks the result
   4. Retries up to MAX_ATTEMPTS if QA fails
 
-Usage:
-  Standalone:  python cb_symbol_fixer.py <image_path> [--reference <ref_path>]
-  As module:   from cb_symbol_fixer import fix_remote_symbols
-  As server:   python cb_symbol_fixer.py --serve (runs Flask on port 5050)
-
 Environment variables:
   BFL_API_KEY        — Black Forest Labs API key
   ANTHROPIC_API_KEY  — Anthropic API key
@@ -38,12 +33,9 @@ ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
 KONTEXT_ENDPOINT = "https://api.bfl.ai/v1/flux-kontext-pro"
 KONTEXT_RESULT_ENDPOINT = "https://api.bfl.ai/v1/get_result"
 MAX_ATTEMPTS = 3
-POLL_INTERVAL = 3  # seconds between polling BFL result
+POLL_INTERVAL = 3
 
 
-# ---------------------------------------------------------------------------
-# Correct button layout (ground truth)
-# ---------------------------------------------------------------------------
 CORRECT_LAYOUT = """
 The Chubby Buttons remote has 6 large round rubber buttons arranged in
 a 2-column x 3-row grid on an olive/army green matte plastic body,
@@ -52,46 +44,31 @@ plus a small power button and a small Bluetooth button.
 Correct symbol layout when the remote is worn on the forearm
 (reading from ELBOW end toward WRIST):
 
-  Row 1 (nearest elbow):  Volume Down (—)  |  Power icon (small, top edge)
-  Row 2 (middle):         Skip Back (◁◁)   |  Play/Pause (▷ ‖)
-  Row 3 (nearest wrist):  Skip Fwd (▷▷)    |  Volume Up (+)
+  Row 1 (nearest elbow):  Volume Down (horizontal line)  |  Power icon (small, top edge)
+  Row 2 (middle):         Skip Back (double left triangles)  |  Play/Pause (right triangle with pause bars)
+  Row 3 (nearest wrist):  Skip Forward (double right triangles)  |  Volume Up (plus sign)
 
 The strap reads "Chubby Buttons" in a woven pattern.
 All button symbols are subtle embossed lines in yellow-green on olive buttons.
 """
 
 
-def encode_image(path: str) -> str:
-    """Read image file and return base64 string."""
+def encode_image(path):
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
 
 
-def encode_image_bytes(data: bytes) -> str:
+def encode_image_bytes(data):
     return base64.b64encode(data).decode()
 
 
-def get_media_type(path: str) -> str:
-    ext = Path(path).suffix.lower()
+def get_media_type(path):
+    ext = Path(path).suffix.lower().lstrip(".")
     return {"jpg": "image/jpeg", "jpeg": "image/jpeg",
-            "png": "image/png", "webp": "image/webp"}.get(ext.lstrip("."), "image/png")
+            "png": "image/png", "webp": "image/webp"}.get(ext, "image/png")
 
 
-# ---------------------------------------------------------------------------
-# Step 1: Claude Vision — Locate remote and assess symbols
-# ---------------------------------------------------------------------------
-def assess_symbols(image_b64: str, media_type: str = "image/png") -> dict:
-    """
-    Ask Claude to locate the remote in the image and evaluate
-    whether the button symbols are correct.
-
-    Returns dict with keys:
-      - remote_found (bool)
-      - symbols_correct (bool)
-      - orientation (str): e.g. "horizontal", "vertical"
-      - issues (list[str]): specific problems detected
-      - correction_instruction (str): natural language edit instruction
-    """
+def assess_symbols(image_b64, media_type="image/png"):
     response = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -142,22 +119,16 @@ Respond ONLY in this JSON format, no other text:
         },
     )
 
+    print(f"      Claude API status: {response.status_code}")
     data = response.json()
+    if "content" not in data:
+        raise RuntimeError(f"Claude API error: {data}")
     text = data["content"][0]["text"]
-    # Strip markdown fences if present
     text = text.replace("```json", "").replace("```", "").strip()
     return json.loads(text)
 
 
-# ---------------------------------------------------------------------------
-# Step 2: FLUX Kontext Pro — Fix the symbols
-# ---------------------------------------------------------------------------
-def call_kontext(image_b64: str, instruction: str) -> str:
-    """
-    Call FLUX Kontext Pro to edit the image based on the instruction.
-    Returns base64 of the corrected image, or URL to download.
-    """
-    # Submit the task
+def call_kontext(image_b64, instruction):
     response = requests.post(
         KONTEXT_ENDPOINT,
         headers={
@@ -171,6 +142,7 @@ def call_kontext(image_b64: str, instruction: str) -> str:
             "output_format": "png",
         },
     )
+    print(f"      Kontext API status: {response.status_code}")
     result = response.json()
     task_id = result.get("id")
     polling_url = result.get("polling_url")
@@ -178,8 +150,9 @@ def call_kontext(image_b64: str, instruction: str) -> str:
     if not task_id:
         raise RuntimeError(f"Kontext submission failed: {result}")
 
-    # Poll for result
-    for _ in range(60):
+    print(f"      Kontext task ID: {task_id}")
+
+    for i in range(60):
         time.sleep(POLL_INTERVAL)
         poll = requests.get(
             polling_url or f"{KONTEXT_RESULT_ENDPOINT}?id={task_id}",
@@ -190,11 +163,11 @@ def call_kontext(image_b64: str, instruction: str) -> str:
         )
         poll_data = poll.json()
         status = poll_data.get("status")
+        print(f"      Poll {i+1}: {status}")
 
         if status == "Ready":
             image_url = poll_data["result"]["sample"]
-            # Download the image
-            img_response = requests.get(image_url)
+            img_response = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"})
             return encode_image_bytes(img_response.content)
 
         if status in ("Error", "Failed"):
@@ -203,14 +176,7 @@ def call_kontext(image_b64: str, instruction: str) -> str:
     raise TimeoutError("Kontext generation timed out after 3 minutes")
 
 
-# ---------------------------------------------------------------------------
-# Step 3: Claude Vision QA — Verify the fix
-# ---------------------------------------------------------------------------
-def qa_check(image_b64: str, media_type: str = "image/png") -> dict:
-    """
-    Run QA on the corrected image.
-    Returns dict with: pass (bool), score (1-10), remaining_issues (list)
-    """
+def qa_check(image_b64, media_type="image/png"):
     response = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -258,32 +224,16 @@ Respond ONLY in JSON:
         },
     )
 
+    print(f"      Claude QA status: {response.status_code}")
     data = response.json()
+    if "content" not in data:
+        raise RuntimeError(f"Claude QA error: {data}")
     text = data["content"][0]["text"]
     text = text.replace("```json", "").replace("```", "").strip()
     return json.loads(text)
 
 
-# ---------------------------------------------------------------------------
-# Main pipeline
-# ---------------------------------------------------------------------------
-def fix_remote_symbols(
-    image_path: str,
-    output_path: str = None,
-    reference_path: str = None,
-) -> dict:
-    """
-    Full pipeline: assess → fix → QA → retry if needed.
-
-    Args:
-        image_path: Path to the AI-generated image
-        output_path: Where to save the corrected image (default: <input>_fixed.png)
-        reference_path: Optional path to reference product photo (not yet used
-                        by Kontext, reserved for future reference-guided editing)
-
-    Returns:
-        dict with: success, attempts, final_score, output_path
-    """
+def fix_remote_symbols(image_path, output_path=None, reference_path=None):
     if not output_path:
         p = Path(image_path)
         output_path = str(p.parent / f"{p.stem}_fixed.png")
@@ -292,16 +242,17 @@ def fix_remote_symbols(
     image_b64 = encode_image(image_path)
 
     print("[1/3] Assessing symbols with Claude Vision...")
+    print(f"      ANTHROPIC_API_KEY set: {bool(ANTHROPIC_API_KEY)} (len={len(ANTHROPIC_API_KEY)})")
+    print(f"      BFL_API_KEY set: {bool(BFL_API_KEY)} (len={len(BFL_API_KEY)})")
+
     assessment = assess_symbols(image_b64, media_type)
     print(f"      Remote found: {assessment['remote_found']}")
     print(f"      Symbols correct: {assessment['symbols_correct']}")
 
     if not assessment["remote_found"]:
-        print("      No remote detected in image. Skipping.")
         return {"success": False, "reason": "no_remote", "attempts": 0}
 
     if assessment["symbols_correct"]:
-        print("      Symbols already correct! No fix needed.")
         return {"success": True, "reason": "already_correct", "attempts": 0}
 
     print(f"      Issues: {assessment['issues']}")
@@ -309,17 +260,17 @@ def fix_remote_symbols(
     current_b64 = image_b64
     best_score = 0
     best_b64 = None
+    qa_result = None
+    attempt = 0
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         print(f"\n[2/3] Attempt {attempt}/{MAX_ATTEMPTS}: Fixing with FLUX Kontext Pro...")
 
-        # Build instruction, escalating specificity on retries
         instruction = assessment["correction_instruction"]
-        if attempt > 1:
+        if attempt > 1 and qa_result and qa_result.get("remaining_issues"):
             instruction += (
                 f" IMPORTANT: Previous attempt still had these issues: "
-                f"{qa_result['remaining_issues']}. "
-                f"Please fix these specifically."
+                f"{qa_result['remaining_issues']}. Fix these specifically."
             )
 
         print(f"      Instruction: {instruction[:120]}...")
@@ -345,10 +296,8 @@ def fix_remote_symbols(
         if qa_result.get("remaining_issues"):
             print(f"      Remaining issues: {qa_result['remaining_issues']}")
 
-        # Feed the best result back for next iteration
         current_b64 = best_b64
 
-    # Save best result
     if best_b64:
         with open(output_path, "wb") as f:
             f.write(base64.b64decode(best_b64))
@@ -363,7 +312,7 @@ def fix_remote_symbols(
 
 
 # ---------------------------------------------------------------------------
-# Flask server mode (for Make.com webhook integration)
+# Flask server
 # ---------------------------------------------------------------------------
 from flask import Flask, request as flask_request, jsonify, send_file
 import tempfile
@@ -373,7 +322,12 @@ app = Flask(__name__)
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "service": "cb-symbol-fixer"})
+    return jsonify({
+        "status": "ok",
+        "service": "cb-symbol-fixer",
+        "anthropic_key_set": bool(ANTHROPIC_API_KEY),
+        "bfl_key_set": bool(BFL_API_KEY),
+    })
 
 
 @app.route("/fix", methods=["POST"])
@@ -384,29 +338,25 @@ def fix():
     if not image_url:
         return jsonify({"error": "image_url required"}), 400
 
-    img_data = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}).content
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        tmp.write(img_data)
-        tmp_path = tmp.name
+    try:
+        img_data = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}).content
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(img_data)
+            tmp_path = tmp.name
 
-    output_path = tmp_path.replace(".png", "_fixed.png")
-    result = fix_remote_symbols(tmp_path, output_path)
-    os.unlink(tmp_path)
+        output_path = tmp_path.replace(".png", "_fixed.png")
+        result = fix_remote_symbols(tmp_path, output_path)
+        os.unlink(tmp_path)
 
-    if result["success"] and os.path.exists(output_path):
-        return send_file(output_path, mimetype="image/png")
-    else:
-        return jsonify(result), 422
-
-
-def run_server():
-    print("Starting CB Symbol Fixer server on port 5050...")
-    app.run(host="0.0.0.0", port=5050)
+        if result["success"] and os.path.exists(output_path):
+            return send_file(output_path, mimetype="image/png")
+        else:
+            return jsonify(result), 422
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fix Chubby Buttons remote symbols")
     parser.add_argument("image", nargs="?", help="Path to image to fix")
@@ -416,7 +366,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.serve:
-        run_server()
+        app.run(host="0.0.0.0", port=5050)
     elif args.image:
         result = fix_remote_symbols(args.image, args.output, args.reference)
         print(json.dumps(result, indent=2))
