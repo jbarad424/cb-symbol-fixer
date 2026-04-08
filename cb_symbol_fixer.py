@@ -384,7 +384,7 @@ def fix():
     if not image_url:
         return jsonify({"error": "image_url required"}), 400
 
-    img_data = requests.get(image_url).content
+    img_data = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}).content
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         tmp.write(img_data)
         tmp_path = tmp.name
