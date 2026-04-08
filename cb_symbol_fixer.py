@@ -1,9 +1,6 @@
 """
 CB Creative Studio — Remote Symbol Fixer
 =========================================
-Post-processing module that detects and corrects Chubby Buttons remote
-symbols in AI-generated marketing images.
-
 Pipeline:
   1. Claude Vision locates the remote and assesses symbol accuracy
   2. FLUX Kontext Pro fixes symbols via instruction-based editing
@@ -24,9 +21,6 @@ import argparse
 import requests
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 BFL_API_KEY = os.environ.get("BFL_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
@@ -34,7 +28,6 @@ KONTEXT_ENDPOINT = "https://api.bfl.ai/v1/flux-kontext-pro"
 KONTEXT_RESULT_ENDPOINT = "https://api.bfl.ai/v1/get_result"
 MAX_ATTEMPTS = 3
 POLL_INTERVAL = 3
-
 
 CORRECT_LAYOUT = """
 The Chubby Buttons remote has 6 large round rubber buttons arranged in
@@ -244,6 +237,7 @@ def fix_remote_symbols(image_path, output_path=None, reference_path=None):
     print("[1/3] Assessing symbols with Claude Vision...")
     print(f"      ANTHROPIC_API_KEY set: {bool(ANTHROPIC_API_KEY)} (len={len(ANTHROPIC_API_KEY)})")
     print(f"      BFL_API_KEY set: {bool(BFL_API_KEY)} (len={len(BFL_API_KEY)})")
+    print(f"      Media type: {media_type}")
 
     assessment = assess_symbols(image_b64, media_type)
     print(f"      Remote found: {assessment['remote_found']}")
@@ -340,11 +334,14 @@ def fix():
 
     try:
         img_data = requests.get(image_url, headers={"User-Agent": "Mozilla/5.0"}).content
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+
+        # Detect file extension from URL so media type is correct
+        ext = os.path.splitext(image_url.split("?")[0])[1] or ".png"
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
             tmp.write(img_data)
             tmp_path = tmp.name
 
-        output_path = tmp_path.replace(".png", "_fixed.png")
+        output_path = tmp_path + "_fixed.png"
         result = fix_remote_symbols(tmp_path, output_path)
         os.unlink(tmp_path)
 
